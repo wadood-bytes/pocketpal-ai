@@ -21,8 +21,30 @@ jobs:
       - name: Install JS dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Create empty .env
-        run: touch .env
+      - name: Create dummy .env and GoogleService-Info.plist
+        run: |
+          touch .env
+          cat << 'EOF' > ios/GoogleService-Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>API_KEY</key><string>AIzaSyDummyKeyForUnsignedBuild12345</string>
+            <key>GCM_SENDER_ID</key><string>123456789012</string>
+            <key>PLIST_VERSION</key><string>1</string>
+            <key>BUNDLE_ID</key><string>com.pocketpalai</string>
+            <key>PROJECT_ID</key><string>pocketpal-dummy</string>
+            <key>STORAGE_BUCKET</key><string>pocketpal-dummy.appspot.com</string>
+            <key>IS_ADS_ENABLED</key><false/>
+            <key>IS_ANALYTICS_ENABLED</key><false/>
+            <key>IS_APPINVITE_ENABLED</key><false/>
+            <key>IS_GCM_ENABLED</key><false/>
+            <key>IS_SIGNIN_ENABLED</key><false/>
+            <key>GOOGLE_APP_ID</key><string>1:123456789012:ios:1234567890abcdef</string>
+          </dict>
+          </plist>
+          EOF
+          cp ios/GoogleService-Info.plist ios/PocketPal/GoogleService-Info.plist
 
       - name: Install CocoaPods dependencies
         run: |
@@ -39,10 +61,12 @@ jobs:
             -scheme PocketPal \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
             GCC_OPTIMIZATION_LEVEL=s \
             ASSETCATALOG_COMPILER_OPTIMIZATION=space
 
