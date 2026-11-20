@@ -21,9 +21,17 @@ jobs:
       - name: Install JS dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Create dummy .env and GoogleService-Info.plist
+      - name: Create missing config files (.env, Env.xcconfig, GoogleService-Info.plist)
         run: |
-          touch .env
+          if [ -f .env.example ]; then cp .env.example .env; else touch .env; fi
+
+          mkdir -p ios/Config
+          if [ -f ios/Config/Env.xcconfig.example ]; then
+            cp ios/Config/Env.xcconfig.example ios/Config/Env.xcconfig
+          elif [ ! -f ios/Config/Env.xcconfig ]; then
+            echo '#include? "../tmp.xcconfig"' > ios/Config/Env.xcconfig
+          fi
+
           cat << 'EOF' > ios/GoogleService-Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -73,7 +81,7 @@ jobs:
       - name: Package as unsigned IPA
         run: |
           mkdir -p Payload
-          cp -r ios/build/Build/Products/Release-iphoneos/PocketPal.app Payload/
+          cp -r ios/build/Build/Products/Release-iphoneos/*.app Payload/
           zip -r PocketPal-unsigned.ipa Payload
 
       - name: Upload IPA artifact
