@@ -5,12 +5,12 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-26
+    runs-on: macos-26-intel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-            - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
+      - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
         run: |
           mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pod/Headers /tmp/bin /tmp/ort-test
 
@@ -48,37 +48,6 @@ jobs:
           chmod +x /tmp/bin/curl
           echo "/tmp/bin" >> $GITHUB_PATH
 
-          export PATH="/tmp/bin:$PATH"
-          cat << 'EOF' > /tmp/ort-test/Podfile
-          platform :ios, '15.1'
-          target 'TestApp' do
-            pod 'onnxruntime-c', '1.24.3'
-          end
-          EOF
-          (cd /tmp/ort-test && pod install)
-          rm -rf /tmp/ort-test
-          # 3. Create curl interceptor for dead download.onnxruntime.ai URL
-          cat << 'EOF' > /tmp/bin/curl
-          #!/bin/bash
-          OUT=""
-          IS_ORT=0
-          PREV=""
-          for arg in "$@"; do
-            if [ "$PREV" = "-o" ]; then OUT="$arg"; fi
-            if [[ "$arg" == *"pod-archive-onnxruntime-c-1.24.3.zip"* ]]; then IS_ORT=1; fi
-            PREV="$arg"
-          done
-          if [ "$IS_ORT" -eq 1 ] && [ -n "$OUT" ]; then
-            mkdir -p "$(dirname "$OUT")"
-            cp /tmp/ort-cache/pod-archive-onnxruntime-c-1.24.3.zip "$OUT"
-            exit 0
-          fi
-          exec /usr/bin/curl "$@"
-          EOF
-          chmod +x /tmp/bin/curl
-          echo "/tmp/bin" >> $GITHUB_PATH
-
-          # 4. Run instant 15-second CocoaPods verification test before slow steps
           export PATH="/tmp/bin:$PATH"
           cat << 'EOF' > /tmp/ort-test/Podfile
           platform :ios, '15.1'
