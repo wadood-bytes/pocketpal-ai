@@ -5,32 +5,26 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-26
+    runs-on: macos-26-intel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pkg/Headers /tmp/ort-test
 
-          # 1. Clone Microsoft's official iOS SPM repo (uses git, never api.github.com)
-          git clone --depth 1 https://github.com/microsoft/onnxruntime-swift-package-manager.git /tmp/ort-spm
-          ASSET_URL=$(grep -Eo 'https://[^"]*\.zip' /tmp/ort-spm/Package.swift | head -n 1)
-
-          if [ -z "$ASSET_URL" ]; then
-            echo "Could not find zip URL in Package.swift:"
-            cat /tmp/ort-spm/Package.swift
-            exit 1
+          # Download official iOS XCFramework directly from Maven Central
+          BASE="https://repo1.maven.org/maven2/com/microsoft/onnxruntime"
+          VER="1.24.3"
+          if ! curl -fsSL "$BASE/onnxruntime-mobile-ios/$VER/onnxruntime-mobile-ios-$VER.xcframework.zip" -o /tmp/ort-cache/ort-ios.zip; then
+            if ! curl -fsSL "$BASE/onnxruntime-ios/$VER/onnxruntime-ios-$VER.xcframework.zip" -o /tmp/ort-cache/ort-ios.zip; then
+              VER="1.21.0"
+              curl -fL "$BASE/onnxruntime-mobile-ios/$VER/onnxruntime-mobile-ios-$VER.xcframework.zip" -o /tmp/ort-cache/ort-ios.zip
+            fi
           fi
 
-          echo "Downloading official iOS binary from: $ASSET_URL"
-          curl -fL "$ASSET_URL" -o /tmp/ort-cache/ort-ios.zip
           unzip -q /tmp/ort-cache/ort-ios.zip -d /tmp/ort-cache/raw
-
-          # 2. Extract onnxruntime.xcframework + public headers into a clean local package
           XCFW=$(find /tmp/ort-cache/raw -name "*.xcframework" -type d | head -n 1)
           if [ -z "$XCFW" ]; then
             echo "No xcframework found in archive:"
@@ -42,7 +36,6 @@ jobs:
           find /tmp/ort-cache/pkg/onnxruntime.xcframework -name "*.h" -exec cp {} /tmp/ort-cache/pkg/Headers/ \;
           (cd /tmp/ort-cache/pkg && zip -qr /tmp/ort-cache/ort-pod.zip .)
 
-          # 3. Create local CocoaPods spec so pod install never hits dead download.onnxruntime.ai
           cat << 'EOF' > /tmp/ort-cache/onnxruntime-c.podspec
           Pod::Spec.new do |s|
             s.name                  = 'onnxruntime-c'
@@ -63,7 +56,7 @@ jobs:
           end
           EOF
 
-          # 4. Run 15-second CocoaPods verification before slow steps
+          # 15-second CocoaPods verification test
           cat << 'EOF' > /tmp/ort-test/Podfile
           platform :ios, '15.1'
           target 'TestApp' do
@@ -71,7 +64,7 @@ jobs:
           end
           EOF
           (cd /tmp/ort-test && pod install)
-          rm -rf /tmp/ort-test /tmp/ort-spm
+          rm -rf /tmp/ort-test
 
       - name: Setup Node from .nvmrc
         uses: actions/setup-node@v4
@@ -119,7 +112,6 @@ jobs:
           EOF
           cp ios/GoogleService-Info.plist ios/PocketPal/GoogleService-Info.plist
 
-          # Point Podfile to our verified local onnxruntime-c podspec
           python3 -c "
           p = 'ios/Podfile'
           txt = open(p).read()
