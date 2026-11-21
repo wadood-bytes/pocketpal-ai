@@ -5,28 +5,32 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-26-intel
+    runs-on: macos-26
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pod/Headers /tmp/bin /tmp/ort-test
+          mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pkg/Headers /tmp/ort-test
 
-          ASSET_URL=$(/usr/bin/curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=10" \
-            | jq -r '[.[] | .assets[] | select(.name | test("pod-archive-onnxruntime-c|onnxruntime.*(ios|xcframework|objc).*\\.zip$"; "i")) | .browser_download_url][0]')
+          # 1. Clone Microsoft's official iOS SPM repo (uses git, never api.github.com)
+          git clone --depth 1 https://github.com/microsoft/onnxruntime-swift-package-manager.git /tmp/ort-spm
+          ASSET_URL=$(grep -Eo 'https://[^"]*\.zip' /tmp/ort-spm/Package.swift | head -n 1)
 
-          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "Matching asset not found. Available assets:"
-            /usr/bin/curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=5" | jq -r '.[].assets[].name'
+          if [ -z "$ASSET_URL" ]; then
+            echo "Could not find zip URL in Package.swift:"
+            cat /tmp/ort-spm/Package.swift
             exit 1
           fi
 
-          echo "Downloading iOS binary from: $ASSET_URL"
-          /usr/bin/curl -fL "$ASSET_URL" -o /tmp/ort-cache/ort-ios.zip
+          echo "Downloading official iOS binary from: $ASSET_URL"
+          curl -fL "$ASSET_URL" -o /tmp/ort-cache/ort-ios.zip
           unzip -q /tmp/ort-cache/ort-ios.zip -d /tmp/ort-cache/raw
 
+          # 2. Extract onnxruntime.xcframework + public headers into a clean local package
           XCFW=$(find /tmp/ort-cache/raw -name "*.xcframework" -type d | head -n 1)
           if [ -z "$XCFW" ]; then
             echo "No xcframework found in archive:"
@@ -34,41 +38,40 @@ jobs:
             exit 1
           fi
 
-          cp -r "$XCFW" /tmp/ort-cache/pod/onnxruntime.xcframework
-          find /tmp/ort-cache/pod/onnxruntime.xcframework -name "*.h" -exec cp {} /tmp/ort-cache/pod/Headers/ \;
-          (cd /tmp/ort-cache/pod && zip -qr /tmp/ort-cache/pod-archive-onnxruntime-c-1.24.3.zip .)
+          cp -r "$XCFW" /tmp/ort-cache/pkg/onnxruntime.xcframework
+          find /tmp/ort-cache/pkg/onnxruntime.xcframework -name "*.h" -exec cp {} /tmp/ort-cache/pkg/Headers/ \;
+          (cd /tmp/ort-cache/pkg && zip -qr /tmp/ort-cache/ort-pod.zip .)
 
-          cat << 'EOF' > /tmp/bin/curl
-          #!/bin/bash
-          OUT=""
-          IS_ORT=0
-          PREV=""
-          for arg in "$@"; do
-            if [ "$PREV" = "-o" ]; then OUT="$arg"; fi
-            if [[ "$arg" == *"pod-archive-onnxruntime-c-1.24.3.zip"* ]]; then IS_ORT=1; fi
-            PREV="$arg"
-          done
-          if [ "$IS_ORT" -eq 1 ] && [ -n "$OUT" ]; then
-            mkdir -p "$(dirname "$OUT")"
-            cp /tmp/ort-cache/pod-archive-onnxruntime-c-1.24.3.zip "$OUT"
-            exit 0
-          fi
-          REAL_CURL="/usr/local/opt/curl/bin/curl"
-          [ -x "$REAL_CURL" ] || REAL_CURL="/usr/bin/curl"
-          exec "$REAL_CURL" "$@"
+          # 3. Create local CocoaPods spec so pod install never hits dead download.onnxruntime.ai
+          cat << 'EOF' > /tmp/ort-cache/onnxruntime-c.podspec
+          Pod::Spec.new do |s|
+            s.name                  = 'onnxruntime-c'
+            s.version               = '1.24.3'
+            s.summary               = 'ONNX Runtime C/C++ iOS framework'
+            s.homepage              = 'https://onnxruntime.ai'
+            s.license               = { :type => 'MIT' }
+            s.author                = 'Microsoft'
+            s.source                = { :http => 'file:///tmp/ort-cache/ort-pod.zip' }
+            s.ios.deployment_target = '13.0'
+            s.vendored_frameworks   = 'onnxruntime.xcframework'
+            s.preserve_paths        = 'onnxruntime.xcframework/**/*'
+            s.source_files          = 'Headers/*.h'
+            s.public_header_files   = 'Headers/*.h'
+            s.xcconfig              = { 'HEADER_SEARCH_PATHS' => '"${PODS_ROOT}/onnxruntime-c/Headers"' }
+            s.frameworks            = 'Foundation', 'CoreML'
+            s.libraries             = 'c++'
+          end
           EOF
-          chmod +x /tmp/bin/curl
-          echo "/tmp/bin" >> $GITHUB_PATH
 
-          export PATH="/tmp/bin:$PATH"
+          # 4. Run 15-second CocoaPods verification before slow steps
           cat << 'EOF' > /tmp/ort-test/Podfile
           platform :ios, '15.1'
           target 'TestApp' do
-            pod 'onnxruntime-c', '1.24.3'
+            pod 'onnxruntime-c', :podspec => '/tmp/ort-cache/onnxruntime-c.podspec'
           end
           EOF
           (cd /tmp/ort-test && pod install)
-          rm -rf /tmp/ort-test
+          rm -rf /tmp/ort-test /tmp/ort-spm
 
       - name: Setup Node from .nvmrc
         uses: actions/setup-node@v4
@@ -81,7 +84,7 @@ jobs:
       - name: Install JS dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Create missing config files
+      - name: Create missing config files & patch Podfile
         run: |
           if [ -f .env.example ]; then cp .env.example .env; else touch .env; fi
 
@@ -115,6 +118,16 @@ jobs:
           </plist>
           EOF
           cp ios/GoogleService-Info.plist ios/PocketPal/GoogleService-Info.plist
+
+          # Point Podfile to our verified local onnxruntime-c podspec
+          python3 -c "
+          p = 'ios/Podfile'
+          txt = open(p).read()
+          inject = \"  pod 'onnxruntime-c', :podspec => '/tmp/ort-cache/onnxruntime-c.podspec'\n\"
+          if 'onnxruntime-c' not in txt:
+              txt = txt.replace(\"target 'PocketPal' do\n\", \"target 'PocketPal' do\n\" + inject, 1)
+              open(p, 'w').write(txt)
+          "
 
       - name: Install CocoaPods dependencies
         run: |
