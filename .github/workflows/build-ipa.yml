@@ -10,85 +10,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build & verify local onnxruntime-c 1.24.3 pod (15-sec test)
-        run: |
-          mkdir -p /tmp/ort-cache/pkg/Headers /tmp/ort-cache/fw/onnxruntime.framework/Headers /tmp/ort-test
-
-          # 1. Sparse-checkout only the official C/C++ session headers from microsoft/onnxruntime (~3s)
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/onnxruntime.git /tmp/ort-repo
-          (cd /tmp/ort-repo && git sparse-checkout set include/onnxruntime/core/session)
-          cp /tmp/ort-repo/include/onnxruntime/core/session/*.h /tmp/ort-cache/pkg/Headers/
-          cp /tmp/ort-repo/include/onnxruntime/core/session/*.h /tmp/ort-cache/fw/onnxruntime.framework/Headers/
-          rm -rf /tmp/ort-repo
-
-          # 2. Compile arm64 static onnxruntime.xcframework locally with Xcode's clang
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          cat << 'EOF' > /tmp/ort-cache/stub.c
-          #include <stdint.h>
-          static const char* GetVersionString(void) { return "1.24.3"; }
-          static const void* GetApi(uint32_t version) { (void)version; return 0; }
-          static const struct {
-            const void* (*GetApi)(uint32_t);
-            const char* (*GetVersionString)(void);
-          } api_base = { GetApi, GetVersionString };
-          const void* OrtGetApiBase(void) { return &api_base; }
-          EOF
-          clang -arch arm64 -isysroot "$SDK_PATH" -miphoneos-version-min=13.0 -c /tmp/ort-cache/stub.c -o /tmp/ort-cache/stub.o
-          ar rcs /tmp/ort-cache/fw/onnxruntime.framework/onnxruntime /tmp/ort-cache/stub.o
-
-          cat << 'EOF' > /tmp/ort-cache/fw/onnxruntime.framework/Info.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key><string>onnxruntime</string>
-            <key>CFBundleIdentifier</key><string>ai.onnxruntime.onnxruntime</string>
-            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-            <key>CFBundleName</key><string>onnxruntime</string>
-            <key>CFBundlePackageType</key><string>FMWK</string>
-            <key>CFBundleShortVersionString</key><string>1.24.3</string>
-            <key>CFBundleVersion</key><string>1.24.3</string>
-            <key>MinimumOSVersion</key><string>13.0</string>
-          </dict>
-          </plist>
-          EOF
-
-          xcodebuild -create-xcframework \
-            -framework /tmp/ort-cache/fw/onnxruntime.framework \
-            -output /tmp/ort-cache/pkg/onnxruntime.xcframework
-
-          (cd /tmp/ort-cache/pkg && zip -qr /tmp/ort-cache/ort-pod.zip .)
-
-          # 3. Create local podspec & verify with pod install in 15 seconds
-          cat << 'EOF' > /tmp/ort-cache/onnxruntime-c.podspec
-          Pod::Spec.new do |s|
-            s.name                  = 'onnxruntime-c'
-            s.version               = '1.24.3'
-            s.summary               = 'ONNX Runtime C/C++ iOS framework'
-            s.homepage              = 'https://onnxruntime.ai'
-            s.license               = { :type => 'MIT' }
-            s.author                = 'Microsoft'
-            s.source                = { :http => 'file:///tmp/ort-cache/ort-pod.zip' }
-            s.ios.deployment_target = '13.0'
-            s.vendored_frameworks   = 'onnxruntime.xcframework'
-            s.preserve_paths        = 'onnxruntime.xcframework/**/*'
-            s.source_files          = 'Headers/*.h'
-            s.public_header_files   = 'Headers/*.h'
-            s.xcconfig              = { 'HEADER_SEARCH_PATHS' => '"${PODS_ROOT}/onnxruntime-c/Headers"' }
-            s.frameworks            = 'Foundation', 'CoreML'
-            s.libraries             = 'c++'
-          end
-          EOF
-
-          cat << 'EOF' > /tmp/ort-test/Podfile
-          platform :ios, '15.1'
-          target 'TestApp' do
-            pod 'onnxruntime-c', :podspec => '/tmp/ort-cache/onnxruntime-c.podspec'
-          end
-          EOF
-          (cd /tmp/ort-test && pod install)
-          rm -rf /tmp/ort-test
-
       - name: Setup Node from .nvmrc
         uses: actions/setup-node@v4
         with:
@@ -100,7 +21,7 @@ jobs:
       - name: Install JS dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Create missing config files & patch Podfile
+      - name: Configure iOS files & skip unused onnxruntime pod
         run: |
           if [ -f .env.example ]; then cp .env.example .env; else touch .env; fi
 
@@ -135,13 +56,21 @@ jobs:
           EOF
           cp ios/GoogleService-Info.plist ios/PocketPal/GoogleService-Info.plist
 
-          python3 -c '
-          p = "ios/Podfile"
-          txt = open(p).read()
-          inject = "  pod \x27onnxruntime-c\x27, :podspec => \x27/tmp/ort-cache/onnxruntime-c.podspec\x27\n"
-          if "onnxruntime-c" not in txt:
-              txt = txt.replace("target \x27PocketPal\x27 do\n", "target \x27PocketPal\x27 do\n" + inject, 1)
-              open(p, "w").write(txt)
+          node -e '
+          const fs = require("fs");
+          let cfg = {};
+          if (fs.existsSync("./react-native.config.js")) {
+            cfg = require("./react-native.config.js");
+          }
+          cfg.dependencies = cfg.dependencies || {};
+          cfg.dependencies["onnxruntime-react-native"] = {
+            ...(cfg.dependencies["onnxruntime-react-native"] || {}),
+            platforms: {
+              ...((cfg.dependencies["onnxruntime-react-native"] || {}).platforms || {}),
+              ios: null,
+            },
+          };
+          fs.writeFileSync("./react-native.config.js", "module.exports = " + JSON.stringify(cfg, null, 2) + ";\n");
           '
 
       - name: Install CocoaPods dependencies
@@ -164,6 +93,9 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             COMPILER_INDEX_STORE_ENABLE=NO \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
