@@ -10,29 +10,53 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
+            - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
         run: |
           mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pod/Headers /tmp/bin /tmp/ort-test
 
-          # 1. Fetch official iOS xcframework zip URL from Microsoft's 1.24.3 release
-          ASSET_URL=$(curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime-swift-package-manager/releases/tags/1.24.3" \
-            | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
-
-          if [ -z "$ASSET_URL" ]; then
-            ASSET_URL=$(curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime/releases/tags/v1.24.3" \
-              | jq -r '.assets[] | select(.name | test("onnxruntime.*(ios|xcframework|pod).*\\.zip$"; "i")) | .browser_download_url' | head -n 1)
-          fi
+          ASSET_URL=$(/usr/bin/curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime-swift-package-manager/releases?per_page=5" \
+            | jq -r '[.[] | .assets[] | select(.name | endswith(".zip")) | .browser_download_url][0]')
 
           echo "Downloading iOS binary from: $ASSET_URL"
           /usr/bin/curl -fL "$ASSET_URL" -o /tmp/ort-cache/ort-ios.zip
           unzip -q /tmp/ort-cache/ort-ios.zip -d /tmp/ort-cache/raw
 
-          # 2. Repackage into CocoaPods archive layout (onnxruntime.xcframework + Headers/)
           XCFW=$(find /tmp/ort-cache/raw -name "onnxruntime.xcframework" -type d | head -n 1)
           cp -r "$XCFW" /tmp/ort-cache/pod/onnxruntime.xcframework
           find /tmp/ort-cache/pod/onnxruntime.xcframework -name "*.h" -exec cp {} /tmp/ort-cache/pod/Headers/ \;
           (cd /tmp/ort-cache/pod && zip -qr /tmp/ort-cache/pod-archive-onnxruntime-c-1.24.3.zip .)
 
+          cat << 'EOF' > /tmp/bin/curl
+          #!/bin/bash
+          OUT=""
+          IS_ORT=0
+          PREV=""
+          for arg in "$@"; do
+            if [ "$PREV" = "-o" ]; then OUT="$arg"; fi
+            if [[ "$arg" == *"pod-archive-onnxruntime-c-1.24.3.zip"* ]]; then IS_ORT=1; fi
+            PREV="$arg"
+          done
+          if [ "$IS_ORT" -eq 1 ] && [ -n "$OUT" ]; then
+            mkdir -p "$(dirname "$OUT")"
+            cp /tmp/ort-cache/pod-archive-onnxruntime-c-1.24.3.zip "$OUT"
+            exit 0
+          fi
+          REAL_CURL="/usr/local/opt/curl/bin/curl"
+          [ -x "$REAL_CURL" ] || REAL_CURL="/usr/bin/curl"
+          exec "$REAL_CURL" "$@"
+          EOF
+          chmod +x /tmp/bin/curl
+          echo "/tmp/bin" >> $GITHUB_PATH
+
+          export PATH="/tmp/bin:$PATH"
+          cat << 'EOF' > /tmp/ort-test/Podfile
+          platform :ios, '15.1'
+          target 'TestApp' do
+            pod 'onnxruntime-c', '1.24.3'
+          end
+          EOF
+          (cd /tmp/ort-test && pod install)
+          rm -rf /tmp/ort-test
           # 3. Create curl interceptor for dead download.onnxruntime.ai URL
           cat << 'EOF' > /tmp/bin/curl
           #!/bin/bash
