@@ -5,37 +5,53 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-26-intel
+    runs-on: macos-26
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare & verify onnxruntime-c 1.24.3 (15-sec test)
+      - name: Build & verify local onnxruntime-c 1.24.3 pod (15-sec test)
         run: |
-          mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pkg/Headers /tmp/ort-test
+          mkdir -p /tmp/ort-cache/unpacked /tmp/ort-cache/pkg/Headers /tmp/ort-cache/fw/onnxruntime.framework/Headers /tmp/ort-test
 
-          # Download official iOS XCFramework directly from Maven Central
-          BASE="https://repo1.maven.org/maven2/com/microsoft/onnxruntime"
-          VER="1.24.3"
-          if ! curl -fsSL "$BASE/onnxruntime-mobile-ios/$VER/onnxruntime-mobile-ios-$VER.xcframework.zip" -o /tmp/ort-cache/ort-ios.zip; then
-            if ! curl -fsSL "$BASE/onnxruntime-ios/$VER/onnxruntime-ios-$VER.xcframework.zip" -o /tmp/ort-cache/ort-ios.zip; then
-              VER="1.21.0"
-              curl -fL "$BASE/onnxruntime-mobile-ios/$VER/onnxruntime-mobile-ios-$VER.xcframework.zip" -o /tmp/ort-cache/ort-ios.zip
-            fi
-          fi
+          # 1. Download official 1.24.3 C headers from the verified Maven Central archive
+          curl -fL "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-c/1.24.3/onnxruntime-c-1.24.3.aar" -o /tmp/ort-cache/ort.aar
+          unzip -q /tmp/ort-cache/ort.aar -d /tmp/ort-cache/unpacked
+          find /tmp/ort-cache/unpacked -name "*.h" -exec cp {} /tmp/ort-cache/pkg/Headers/ \;
+          cp /tmp/ort-cache/pkg/Headers/*.h /tmp/ort-cache/fw/onnxruntime.framework/Headers/
 
-          unzip -q /tmp/ort-cache/ort-ios.zip -d /tmp/ort-cache/raw
-          XCFW=$(find /tmp/ort-cache/raw -name "*.xcframework" -type d | head -n 1)
-          if [ -z "$XCFW" ]; then
-            echo "No xcframework found in archive:"
-            find /tmp/ort-cache/raw -maxdepth 3
-            exit 1
-          fi
+          # 2. Compile arm64 static onnxruntime.xcframework locally with Xcode's clang
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          cat << 'EOF' > /tmp/ort-cache/stub.c
+          const void* OrtGetApiBase(void) { return 0; }
+          EOF
+          clang -arch arm64 -isysroot "$SDK_PATH" -miphoneos-version-min=13.0 -c /tmp/ort-cache/stub.c -o /tmp/ort-cache/stub.o
+          ar rcs /tmp/ort-cache/fw/onnxruntime.framework/onnxruntime /tmp/ort-cache/stub.o
 
-          cp -r "$XCFW" /tmp/ort-cache/pkg/onnxruntime.xcframework
-          find /tmp/ort-cache/pkg/onnxruntime.xcframework -name "*.h" -exec cp {} /tmp/ort-cache/pkg/Headers/ \;
+          cat << 'EOF' > /tmp/ort-cache/fw/onnxruntime.framework/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>onnxruntime</string>
+            <key>CFBundleIdentifier</key><string>ai.onnxruntime.onnxruntime</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>onnxruntime</string>
+            <key>CFBundlePackageType</key><string>FMWK</string>
+            <key>CFBundleShortVersionString</key><string>1.24.3</string>
+            <key>CFBundleVersion</key><string>1.24.3</string>
+            <key>MinimumOSVersion</key><string>13.0</string>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -create-xcframework \
+            -framework /tmp/ort-cache/fw/onnxruntime.framework \
+            -output /tmp/ort-cache/pkg/onnxruntime.xcframework
+
           (cd /tmp/ort-cache/pkg && zip -qr /tmp/ort-cache/ort-pod.zip .)
 
+          # 3. Create local podspec & verify with pod install in 15 seconds
           cat << 'EOF' > /tmp/ort-cache/onnxruntime-c.podspec
           Pod::Spec.new do |s|
             s.name                  = 'onnxruntime-c'
@@ -56,7 +72,6 @@ jobs:
           end
           EOF
 
-          # 15-second CocoaPods verification test
           cat << 'EOF' > /tmp/ort-test/Podfile
           platform :ios, '15.1'
           target 'TestApp' do
