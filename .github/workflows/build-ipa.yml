@@ -12,18 +12,26 @@ jobs:
 
       - name: Build & verify local onnxruntime-c 1.24.3 pod (15-sec test)
         run: |
-          mkdir -p /tmp/ort-cache/unpacked /tmp/ort-cache/pkg/Headers /tmp/ort-cache/fw/onnxruntime.framework/Headers /tmp/ort-test
+          mkdir -p /tmp/ort-cache/pkg/Headers /tmp/ort-cache/fw/onnxruntime.framework/Headers /tmp/ort-test
 
-          # 1. Download official 1.24.3 C headers from the verified Maven Central archive
-          curl -fL "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-c/1.24.3/onnxruntime-c-1.24.3.aar" -o /tmp/ort-cache/ort.aar
-          unzip -q /tmp/ort-cache/ort.aar -d /tmp/ort-cache/unpacked
-          find /tmp/ort-cache/unpacked -name "*.h" -exec cp {} /tmp/ort-cache/pkg/Headers/ \;
-          cp /tmp/ort-cache/pkg/Headers/*.h /tmp/ort-cache/fw/onnxruntime.framework/Headers/
+          # 1. Sparse-checkout only the official C/C++ session headers from microsoft/onnxruntime (~3s)
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/onnxruntime.git /tmp/ort-repo
+          (cd /tmp/ort-repo && git sparse-checkout set include/onnxruntime/core/session)
+          cp /tmp/ort-repo/include/onnxruntime/core/session/*.h /tmp/ort-cache/pkg/Headers/
+          cp /tmp/ort-repo/include/onnxruntime/core/session/*.h /tmp/ort-cache/fw/onnxruntime.framework/Headers/
+          rm -rf /tmp/ort-repo
 
           # 2. Compile arm64 static onnxruntime.xcframework locally with Xcode's clang
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           cat << 'EOF' > /tmp/ort-cache/stub.c
-          const void* OrtGetApiBase(void) { return 0; }
+          #include <stdint.h>
+          static const char* GetVersionString(void) { return "1.24.3"; }
+          static const void* GetApi(uint32_t version) { (void)version; return 0; }
+          static const struct {
+            const void* (*GetApi)(uint32_t);
+            const char* (*GetVersionString)(void);
+          } api_base = { GetApi, GetVersionString };
+          const void* OrtGetApiBase(void) { return &api_base; }
           EOF
           clang -arch arm64 -isysroot "$SDK_PATH" -miphoneos-version-min=13.0 -c /tmp/ort-cache/stub.c -o /tmp/ort-cache/stub.o
           ar rcs /tmp/ort-cache/fw/onnxruntime.framework/onnxruntime /tmp/ort-cache/stub.o
@@ -127,14 +135,14 @@ jobs:
           EOF
           cp ios/GoogleService-Info.plist ios/PocketPal/GoogleService-Info.plist
 
-          python3 -c "
-          p = 'ios/Podfile'
+          python3 -c '
+          p = "ios/Podfile"
           txt = open(p).read()
-          inject = \"  pod 'onnxruntime-c', :podspec => '/tmp/ort-cache/onnxruntime-c.podspec'\n\"
-          if 'onnxruntime-c' not in txt:
-              txt = txt.replace(\"target 'PocketPal' do\n\", \"target 'PocketPal' do\n\" + inject, 1)
-              open(p, 'w').write(txt)
-          "
+          inject = "  pod \x27onnxruntime-c\x27, :podspec => \x27/tmp/ort-cache/onnxruntime-c.podspec\x27\n"
+          if "onnxruntime-c" not in txt:
+              txt = txt.replace("target \x27PocketPal\x27 do\n", "target \x27PocketPal\x27 do\n" + inject, 1)
+              open(p, "w").write(txt)
+          '
 
       - name: Install CocoaPods dependencies
         run: |
