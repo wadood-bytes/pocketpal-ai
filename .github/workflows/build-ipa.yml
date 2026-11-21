@@ -14,14 +14,26 @@ jobs:
         run: |
           mkdir -p /tmp/ort-cache/raw /tmp/ort-cache/pod/Headers /tmp/bin /tmp/ort-test
 
-          ASSET_URL=$(/usr/bin/curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime-swift-package-manager/releases?per_page=5" \
-            | jq -r '[.[] | .assets[] | select(.name | endswith(".zip")) | .browser_download_url][0]')
+          ASSET_URL=$(/usr/bin/curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=10" \
+            | jq -r '[.[] | .assets[] | select(.name | test("pod-archive-onnxruntime-c|onnxruntime.*(ios|xcframework|objc).*\\.zip$"; "i")) | .browser_download_url][0]')
+
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Matching asset not found. Available assets:"
+            /usr/bin/curl -fsSL "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=5" | jq -r '.[].assets[].name'
+            exit 1
+          fi
 
           echo "Downloading iOS binary from: $ASSET_URL"
           /usr/bin/curl -fL "$ASSET_URL" -o /tmp/ort-cache/ort-ios.zip
           unzip -q /tmp/ort-cache/ort-ios.zip -d /tmp/ort-cache/raw
 
-          XCFW=$(find /tmp/ort-cache/raw -name "onnxruntime.xcframework" -type d | head -n 1)
+          XCFW=$(find /tmp/ort-cache/raw -name "*.xcframework" -type d | head -n 1)
+          if [ -z "$XCFW" ]; then
+            echo "No xcframework found in archive:"
+            find /tmp/ort-cache/raw -maxdepth 3
+            exit 1
+          fi
+
           cp -r "$XCFW" /tmp/ort-cache/pod/onnxruntime.xcframework
           find /tmp/ort-cache/pod/onnxruntime.xcframework -name "*.h" -exec cp {} /tmp/ort-cache/pod/Headers/ \;
           (cd /tmp/ort-cache/pod && zip -qr /tmp/ort-cache/pod-archive-onnxruntime-c-1.24.3.zip .)
